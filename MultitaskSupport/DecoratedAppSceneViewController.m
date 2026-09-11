@@ -7,14 +7,18 @@
 #import "VirtualWindowsHostView.h"
 #import "../LiveContainer/Localization.h"
 #import "utils.h"
+@import QuickLook;
+@import ReplayKit;
+@import CoreImage;
 
-@interface DecoratedAppSceneViewController()
+@interface DecoratedAppSceneViewController()<QLPreviewControllerDataSource>
 @property(nonatomic) NSArray* activatedVerticalConstraints;
 @property(nonatomic) NSString* dataUUID;
 @property(nonatomic) int pid;
 @property(nonatomic) CGRect originalFrame;
 @property(nonatomic) UIBarButtonItem *maximizeButton;
 @property(nonatomic) bool isAppTerminationRequested;
+@property(nonatomic) NSURL *screenshotURL;
 @end
 
 @implementation DecoratedAppSceneViewController
@@ -43,6 +47,9 @@
             } else {
                 [PiPManager.shared startPiPWithVC:self.appSceneVC];
             }
+        }],
+        [UIAction actionWithTitle:@"lc.multitask.screenshot".loc image:[UIImage systemImageNamed:@"camera.viewfinder"] identifier:nil handler:^(UIAction * _Nonnull action) {
+            [self takeScreenshot];
         }],
         [UICustomViewMenuElement elementWithViewProvider:^UIView *(UICustomViewMenuElement *element) {
             return [self scaleSliderViewWithTitle:@"lc.multitask.scale".loc min:0.5 max:2.0 value:self.scaleRatio stepInterval:0.01];
@@ -237,6 +244,117 @@
             settings.safeAreaInsetsPortrait = UIEdgeInsetsZero;
         }
     }];
+}
+
+- (void)takeScreenshot {
+    // The app is rendered by another process, so nothing on the host side can rasterize it directly (its CALayerHost
+    // draws transparent, and display capture is denied to sandboxed apps). ReplayKit is the sanctioned route: replayd
+    // hands us the composited frames, hosted content and blur effects included. Since that's the whole display, hide
+    // our own overlays for the duration and crop to this window.
+    if([PiPManager.shared isPiPWithVC:self.appSceneVC]) {
+        [self showScreenshotFailedAlert];
+        return;
+    }
+    RPScreenRecorder *recorder = RPScreenRecorder.sharedRecorder;
+    if(!recorder.isAvailable || recorder.isRecording) {
+        [self showScreenshotFailedAlert];
+        return;
+    }
+    recorder.microphoneEnabled = NO;
+
+    // remove the previous screenshot since it's only kept for previewing
+    if(self.screenshotURL) {
+        [NSFileManager.defaultManager removeItemAtURL:self.screenshotURL error:nil];
+        self.screenshotURL = nil;
+    }
+    NSDateFormatter *formatter = [NSDateFormatter new];
+    formatter.dateFormat = @"yyyy-MM-dd HH.mm.ss";
+    NSString *safeTitle = [[self.title componentsSeparatedByCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"/:"]] componentsJoinedByString:@"-"];
+    NSString *fileName = [NSString stringWithFormat:@"%@ %@.png", safeTitle, [formatter stringFromDate:NSDate.date]];
+    NSString *filePath = [NSTemporaryDirectory() stringByAppendingPathComponent:fileName];
+
+    // get everything else out of the frame: dock, and sibling windows that may overlap this one
+    [self.view.superview bringSubviewToFront:self.view];
+    [MultitaskDockManager.shared setDockTemporarilyHidden:YES];
+
+    // capture the window's rect in screen points now; frames arrive on a background queue
+    UIView *targetView = self.appSceneVC.view;
+    CGRect targetRect = [targetView convertRect:targetView.bounds toCoordinateSpace:UIScreen.mainScreen.coordinateSpace];
+    CGSize screenSize = UIScreen.mainScreen.bounds.size;
+
+    __weak typeof(self) weakSelf = self;
+    void (^finish)(BOOL) = ^(BOOL success) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [MultitaskDockManager.shared setDockTemporarilyHidden:NO];
+            if(success) {
+                [weakSelf presentScreenshotPreviewAtPath:filePath];
+            } else {
+                [weakSelf showScreenshotFailedAlert];
+            }
+        });
+    };
+
+    __block int frameCount = 0;
+    __block BOOL captured = NO;
+    [recorder startCaptureWithHandler:^(CMSampleBufferRef sampleBuffer, RPSampleBufferType bufferType, NSError *error) {
+        if(bufferType != RPSampleBufferTypeVideo || captured) return;
+        // the first frames after starting can be blank, and the title menu / dock are still animating out
+        if(++frameCount < 20) return;
+        captured = YES;
+
+        CVPixelBufferRef pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer);
+        CIImage *frame = [CIImage imageWithCVPixelBuffer:pixelBuffer];
+        // ReplayKit tags frames with their orientation relative to the device
+        CFTypeRef orientationValue = CMGetAttachment(sampleBuffer, (__bridge CFStringRef)RPVideoSampleOrientationKey, NULL);
+        if(orientationValue) {
+            frame = [frame imageByApplyingCGOrientation:(CGImagePropertyOrientation)[(__bridge NSNumber *)orientationValue intValue]];
+        }
+        // frames are in pixels; map the window's point rect onto them (CIImage origin is bottom-left)
+        CGFloat frameScale = frame.extent.size.width / screenSize.width;
+        CGRect cropRect = CGRectMake(targetRect.origin.x * frameScale,
+                                     frame.extent.size.height - CGRectGetMaxY(targetRect) * frameScale,
+                                     targetRect.size.width * frameScale,
+                                     targetRect.size.height * frameScale);
+        CIImage *cropped = [frame imageByCroppingToRect:CGRectIntegral(cropRect)];
+        CGImageRef cgImage = [[CIContext context] createCGImage:cropped fromRect:cropped.extent];
+        NSData *pngData = cgImage ? UIImagePNGRepresentation([UIImage imageWithCGImage:cgImage scale:frameScale orientation:UIImageOrientationUp]) : nil;
+        if(cgImage) CGImageRelease(cgImage);
+        BOOL written = [pngData writeToFile:filePath options:NSDataWritingAtomic error:nil];
+
+        [recorder stopCaptureWithHandler:^(NSError *stopError) {
+            finish(written);
+        }];
+    } completionHandler:^(NSError *error) {
+        // also called (with nil) once capture has started; only a failure to start is of interest here
+        if(error) {
+            NSLog(@"[LC] Screenshot: ReplayKit capture failed: %@", error);
+            finish(NO);
+        }
+    }];
+}
+
+- (void)showScreenshotFailedAlert {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"lc.common.error".loc message:@"lc.multitask.screenshotFailed".loc preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"lc.common.ok".loc style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)presentScreenshotPreviewAtPath:(NSString *)filePath {
+    self.screenshotURL = [NSURL fileURLWithPath:filePath];
+    QLPreviewController *previewController = [QLPreviewController new];
+    previewController.dataSource = self;
+    // A full screen presentation removes the presenting hierarchy from the window, which makes AppSceneViewController
+    // think it was closed (viewDidMoveToWindow:nil drops the delegate and scene settings observer). overFullScreen keeps it attached.
+    previewController.modalPresentationStyle = UIModalPresentationOverFullScreen;
+    [self presentViewController:previewController animated:YES completion:nil];
+}
+
+- (NSInteger)numberOfPreviewItemsInPreviewController:(QLPreviewController *)controller {
+    return self.screenshotURL ? 1 : 0;
+}
+
+- (id<QLPreviewItem>)previewController:(QLPreviewController *)controller previewItemAtIndex:(NSInteger)index {
+    return self.screenshotURL;
 }
 
 - (void)closeWindow {

@@ -18552,6 +18552,52 @@
         }
       }
     },
+    "lc.multitask.screenshot" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Screenshot"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "截图"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "截圖"
+          }
+        }
+      }
+    },
+    "lc.multitask.screenshotFailed" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The app did not return a screenshot. Make sure it is in the foreground and try again."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "应用未返回截图。请确保应用处于前台后重试。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "應用程式未回傳截圖。請確認應用程式處於前景後重試。"
+          }
+        }
+      }
+    },
     "lc.multitask.scale" : {
       "comment" : "It's in a slider that changes the scale (like DPI) for multitasking apps",
       "extractionState" : "stale",

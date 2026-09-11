@@ -491,6 +491,11 @@ class AppInfoProvider {
         }
     }
     
+    /// Hides the dock view without touching its state or animating, e.g. so it stays out of a window screenshot
+    @objc public func setDockTemporarilyHidden(_ hidden: Bool) {
+        hostingController?.view.isHidden = hidden
+    }
+
     @objc public func hideDock() {
         guard isVisible, let hostingController = hostingController else { return }
         
